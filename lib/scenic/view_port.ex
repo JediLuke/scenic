@@ -222,11 +222,51 @@ defmodule Scenic.ViewPort do
 
   # --------------------------------------------------------
   @doc """
-  Start a new ViewPort
+  Start a new ViewPort process.
+
+  Creates a new ViewPort that coordinates between scenes and drivers. The ViewPort
+  manages ETS tables for scripts, handles input routing, and provides the central
+  coordination point for Scenic applications.
+
+  ## Options
+
+  - `:name` - Optional atom name to register the ViewPort process
+  - `:size` - Required `{width, height}` tuple defining the viewport dimensions
+  - `:default_scene` - Required scene module or `{module, args}` tuple for the root scene  
+  - `:theme` - Theme configuration (defaults to `:dark`)
+  - `:drivers` - List of driver configurations to start automatically
+  - `:input_filter` - Filter for input types (defaults to `:all`)
+  - `:opts` - Additional style and transform options for the root graph
+
+  ## Returns
+
+  - `{:ok, %ViewPort{}}` - ViewPort struct containing process info and ETS table references
+  - Raises exception on configuration errors
+
+  ## Examples
+
+      # Basic viewport
+      {:ok, vp} = ViewPort.start([
+        name: :main_viewport,
+        size: {800, 600}, 
+        default_scene: MyApp.MainScene
+      ])
+
+      # With driver and theme
+      {:ok, vp} = ViewPort.start([
+        size: {1024, 768},
+        default_scene: {MyApp.Scene.Dashboard, %{user_id: 123}},
+        theme: :light,
+        drivers: [
+          [module: Scenic.Driver.Local, window: [title: "My App"]]
+        ]
+      ])
+
+  ## Notes
+
+  The ViewPort creates its own supervision tree and manages scene/driver lifecycles.
+  If the ViewPort crashes, all associated scenes and scripts will need to be rebuilt.
   """
-  # the ViewPort has it's own supervision tree under the ViewPorts node
-  # first create it's dynamic supervisor. Then start the ViewPort
-  # process underneath, passing it's supervisor in as an parameter.
   @spec start(opts :: Keyword.t()) :: {:ok, ViewPort.t()}
   def start(opts) do
     opts = Enum.into(opts, [])
@@ -261,7 +301,37 @@ defmodule Scenic.ViewPort do
 
   # --------------------------------------------------------
   @doc """
-  Retrieve a script
+  Retrieve a compiled script by name from the ViewPort's ETS table.
+
+  Scripts are the compiled, optimized rendering instructions that drivers use to 
+  draw graphics. This function allows drivers and debugging tools to access 
+  stored scripts directly.
+
+  ## Parameters
+
+  - `viewport` - The ViewPort struct containing the script table reference
+  - `name` - The unique identifier for the script (can be any term)
+
+  ## Returns
+
+  - `{:ok, script}` - The compiled script as a list of drawing commands
+  - `{:error, :not_found}` - If no script exists with the given name
+
+  ## Examples
+
+      # Retrieve a script by name
+      case ViewPort.get_script(viewport, "my_button") do
+        {:ok, script} -> 
+          # Process or inspect the script
+          IO.inspect(script, label: "Button script")
+        {:error, :not_found} ->
+          Logger.warn("Script 'my_button' not found")
+      end
+
+  ## Notes
+
+  This function reads directly from the ETS table without going through the
+  ViewPort process, making it very fast for concurrent access by multiple drivers.
   """
   @spec get_script(viewport :: ViewPort.t(), name :: any) ::
           {:ok, Script.t()} | {:error, :not_found}
@@ -278,9 +348,51 @@ defmodule Scenic.ViewPort do
   end
 
   @doc """
-  Put a script by name.
+  Store a compiled script in the ViewPort's ETS table and notify drivers.
 
-  returns `{:ok, id}`
+  This is the primary mechanism for publishing rendering instructions to drivers.
+  Scripts are stored with change detection - if the same script content is 
+  submitted again, drivers won't be notified unnecessarily.
+
+  ## Parameters
+
+  - `viewport` - The ViewPort struct containing the script table reference
+  - `name` - Unique identifier for the script (can be any term)
+  - `script` - Compiled script as a list of drawing commands
+  - `opts` - Optional configuration (see options below)
+
+  ## Options
+
+  - `:owner` - Process pid that owns the script (defaults to `self()`)
+
+  ## Returns
+
+  - `{:ok, name}` - Script successfully stored and drivers notified
+  - `:no_change` - Script content unchanged, no driver notification sent
+  - `{:error, atom}` - Error during script validation or storage
+
+  ## Examples
+
+      # Store a manually created script
+      script = Script.start()
+      |> Script.fill_color({255, 0, 0, 255})  
+      |> Script.draw_rect({100, 50})
+      |> Script.finish()
+
+      case ViewPort.put_script(viewport, "red_button", script) do
+        {:ok, _} -> Logger.info("Script stored successfully")
+        :no_change -> Logger.debug("Script unchanged")
+      end
+
+      # Store with custom owner (useful for cleanup tracking)
+      ViewPort.put_script(viewport, "component_1", script, owner: component_pid)
+
+  ## Notes
+
+  - Scripts are automatically cleaned up when the owning process crashes
+  - Change detection prevents unnecessary driver updates for identical scripts
+  - Multiple drivers can read the same script concurrently from the ETS table
+  - The function will notify all connected drivers about the script update
   """
   @spec put_script(
           viewport :: ViewPort.t(),
@@ -288,7 +400,7 @@ defmodule Scenic.ViewPort do
           script :: Script.t(),
           opts :: Keyword.t()
         ) ::
-          {:ok, non_neg_integer} | {:error, atom}
+          {:ok, any} | :no_change | {:error, atom}
   def put_script(
         %ViewPort{pid: pid, script_table: script_table},
         name,
@@ -348,16 +460,79 @@ defmodule Scenic.ViewPort do
   end
 
   @doc """
-  Put a graph by name.
+  Compile a graph into a script and store it in the ViewPort.
 
-  This compiles the graph to a collection of scripts
+  This is the primary mechanism scenes use to publish their UI for rendering.
+  The graph is compiled into an optimized script using `Scenic.Graph.Compiler`,
+  stored in the ViewPort's ETS table, and drivers are notified to update their 
+  rendering. Input handling data is also extracted and registered.
+
+  ## Parameters
+
+  - `viewport` - The ViewPort struct containing the script table reference
+  - `name` - Unique identifier for the graph/script (can be any term)  
+  - `graph` - The Graph struct containing primitives, styles, and transforms
+  - `opts` - Optional configuration (see options below)
+
+  ## Options
+
+  - `:owner` - Process pid that owns the graph (defaults to `self()`)
+
+  ## Returns
+
+  - `{:ok, name}` - Graph successfully compiled, stored, and drivers notified
+  - `{:error, reason}` - Compilation or storage error
+
+  ## Examples
+
+      # Basic graph publishing from a scene
+      graph = Graph.build()
+      |> rectangle({100, 50}, fill: :blue, translate: {10, 20})
+      |> text("Click me", translate: {15, 35})
+
+      {:ok, _} = ViewPort.put_graph(viewport, :my_scene, graph)
+
+      # With input handling
+      graph = Graph.build()
+      |> button("Submit", id: :submit_btn, translate: {100, 100})
+      |> text("Status: Ready", id: :status, translate: {100, 150})
+
+      ViewPort.put_graph(viewport, :form_scene, graph)
+
+      # Scene-owned graph (typical pattern)
+      ViewPort.put_graph(viewport, scene_id, graph, owner: self())
+
+  ## Compilation Process
+
+  1. Graph traversed depth-first to collect primitives
+  2. Transforms and styles calculated and inherited
+  3. Drawing commands generated for each primitive
+  4. Input handling data extracted for clickable elements
+  5. Script optimized and stored with change detection
+  6. Drivers notified if script content changed
+  7. Input routing tables updated in ViewPort
+
+  ## Performance Notes
+
+  - Compilation is expensive - avoid frequent graph rebuilds when possible
+  - Change detection prevents unnecessary driver updates
+  - Input data compilation enables efficient hit testing
+  - Large graphs should consider breaking into smaller, reusable scripts
+
+  ## Error Handling
+
+  Compilation can fail if the graph contains:
+  - Invalid primitive data
+  - Malformed transforms or styles  
+  - Circular script references
+  - Resource references that can't be resolved
   """
   @spec put_graph(
           viewport :: ViewPort.t(),
           name :: any,
           graph :: Graph.t(),
           opts :: Keyword.t()
-        ) :: {:ok, name :: any}
+        ) :: {:ok, name :: any} | {:error, atom}
   def put_graph(%ViewPort{pid: pid} = viewport, name, %Graph{} = graph, opts \\ []) do
     opts =
       opts
