@@ -1,229 +1,156 @@
 defmodule Scenic.DevTools do
   @moduledoc """
-  Comprehensive developer tools for inspecting Scenic applications during development.
+  Generic developer tools for inspecting Scenic applications during development.
   
-  This module combines basic semantic inspection, UUID-aware enhanced tools,
-  and high-level "browser dev tools" style inspection into a single namespace.
+  This module provides tools for understanding the structure and state of any
+  Scenic application, focusing on the graph hierarchy and semantic annotations.
   
   ## Usage in IEx
   
       iex> import Scenic.DevTools
       
       # High-level inspection (recommended)
-      iex> inspect_app()           # Browser dev tools style view
-      iex> show_semantic()         # Simple semantic content overview
+      iex> inspect_app()           # Hierarchical view of scenes and graphs
+      iex> show_semantic()         # All semantic content in the app
       
-      # Detailed queries
-      iex> semantic()              # Show semantic info for default viewport
-      iex> buffers()               # Show all text buffers
-      iex> buttons()               # Show all buttons
+      # Scene hierarchy
+      iex> scene_tree()            # Show scene parent-child relationships
+      iex> inspect_scene("_main_") # Detailed view of a specific scene
       
-      # Enhanced tools for UUID graphs
-      iex> semantic_all()          # All semantic data across graphs
-      iex> buffers_all()           # All buffers across graphs
+      # Graph inspection  
+      iex> inspect_graph("uuid")   # Detailed view of a specific graph
+      iex> list_graphs()           # List all graphs with their scenes
+      
+      # Semantic queries (generic)
+      iex> semantic_summary()      # Summary of all semantic annotations
+      iex> find_semantic(:button)  # Find all elements of a semantic type
   """
   
   alias Scenic.ViewPort
   
   @doc """
-  Display semantic information for the current viewport.
+  Show the scene hierarchy as a tree structure.
+  
+  Displays the parent-child relationships between scenes, starting from
+  the root scene and showing all descendant scenes.
   
   ## Examples
   
-      iex> semantic()
-      === Semantic Tree for :main ===
-      Total elements: 3
+      iex> scene_tree()
+      === Scene Hierarchy ===
+      📊 Root Scene: "_main_" (Flamelex.GUI.RootScene)
+      ├── 📄 "layer_1" (Flamelex.GUI.Layers.Layer1)
+      ├── 📄 "layer_2" (Flamelex.GUI.Layers.Layer2) 
+      │   └── 📄 "buffer_pane_abc123" (Quillex.BufferPane)
+      └── 📄 "layer_4" (Flamelex.GUI.Layers.Layer4)
+  """
+  def scene_tree(viewport_name \\ :main_viewport) do
+    with {:ok, viewport} <- get_viewport(viewport_name) do
+      IO.puts("=== Scene Hierarchy ===")
+      
+      # Build the scene tree
+      tree = build_scene_tree(viewport)
+      
+      if tree do
+        render_scene_node(tree, "")
+      else
+        IO.puts("No scenes found in viewport")
+      end
+      
+      :ok
+    else
+      error -> 
+        IO.puts("Error: #{inspect(error)}")
+        :error
+    end
+  end
+  
+  @doc """
+  List all graphs showing which scene owns each graph.
+  
+  ## Examples
+  
+      iex> list_graphs()
+      === Graphs in ViewPort ===
+      Total graphs: 5
+      
+      Graph "_root_" (root scene graph)
+        Scene: "_main_" (Flamelex.GUI.RootScene)
+        Has semantic data: Yes (3 elements)
+      
+      Graph "abc123..."  
+        Scene: "buffer_pane_1" (Quillex.BufferPane)
+        Has semantic data: Yes (1 element)
+  """
+  def list_graphs(viewport_name \\ :main_viewport) do
+    with {:ok, viewport} <- get_viewport(viewport_name) do
+      IO.puts("=== Graphs in ViewPort ===")
+      
+      # Get all scripts from the script table
+      scripts = :ets.tab2list(viewport.script_table)
+      semantic_entries = :ets.tab2list(viewport.semantic_table)
+      
+      IO.puts("Total graphs: #{length(scripts)}")
+      IO.puts("")
+      
+      # Group scripts by their scene
+      Enum.each(scripts, fn {graph_id, _script, owner_pid} ->
+        # Find scene info for this owner
+        scene_info = find_scene_by_pid(viewport, owner_pid)
+        
+        # Check if has semantic data
+        semantic_info = Enum.find(semantic_entries, fn {id, _data} -> id == graph_id end)
+        has_semantic = case semantic_info do
+          {_, data} -> map_size(data.elements) > 0
+          nil -> false
+        end
+        
+        graph_label = if graph_id == "_root_", do: "(root scene graph)", else: ""
+        IO.puts("Graph \"#{short_id(graph_id)}\" #{graph_label}")
+        
+        case scene_info do
+          {scene_id, module} ->
+            IO.puts("  Scene: \"#{scene_id}\" (#{inspect(module)})")
+          nil ->
+            IO.puts("  Scene: Unknown (pid: #{inspect(owner_pid)})")
+        end
+        
+        if has_semantic do
+          {_, data} = semantic_info
+          IO.puts("  Has semantic data: Yes (#{map_size(data.elements)} elements)")
+        else
+          IO.puts("  Has semantic data: No")
+        end
+        
+        IO.puts("")
+      end)
+      
+      :ok
+    else
+      error -> 
+        IO.puts("Error: #{inspect(error)}")
+        :error
+    end
+  end
+  
+  @doc """
+  Show a summary of all semantic annotations in the application.
+  
+  Groups semantic elements by type across all graphs.
+  
+  ## Examples
+  
+      iex> semantic_summary()
+      === Semantic Summary ===
+      Total semantic elements: 15 across 3 graphs
       
       By type:
-        text_buffer: 1 element
-          - :buffer_1: %{type: :text_buffer, buffer_id: 1}
-        button: 2 elements
-          - :save_btn: %{type: :button, label: "Save"}
-          - :cancel_btn: %{type: :button, label: "Cancel"}
+        button: 5 elements
+        text_input: 3 elements  
+        menu: 2 elements
+        custom_widget: 5 elements
   """
-  def semantic(viewport_name \\ :main_viewport, graph_key \\ :main) do
-    with {:ok, viewport} <- get_viewport(viewport_name) do
-      ViewPort.inspect_semantic(viewport, graph_key)
-    else
-      error -> 
-        IO.puts("Error: #{inspect(error)}")
-        :error
-    end
-  end
-  
-  @doc """
-  Show all text buffers and their content.
-  
-  ## Examples
-  
-      iex> buffers()
-      Text Buffers:
-      [1] "Hello, World!"
-      [2] "def my_function do\\n  :ok\\nend"
-  """
-  def buffers(viewport_name \\ :main_viewport, graph_key \\ :main) do
-    with {:ok, viewport} <- get_viewport(viewport_name),
-         {:ok, buffers} <- Scenic.Semantic.Query.find_by_type(viewport, :text_buffer, graph_key) do
-      IO.puts("Text Buffers:")
-      Enum.each(buffers, fn buffer ->
-        content = buffer.content || ""
-        buffer_id = buffer.semantic.buffer_id
-        preview = String.slice(content, 0, 60)
-        preview = if String.length(content) > 60, do: preview <> "...", else: preview
-        IO.puts("[#{buffer_id}] #{inspect(preview)}")
-      end)
-      :ok
-    else
-      {:error, :not_found} -> 
-        IO.puts("No text buffers found")
-        :ok
-      error -> 
-        IO.puts("Error: #{inspect(error)}")
-        :error
-    end
-  end
-  
-  @doc """
-  Show content of a specific buffer.
-  
-  ## Examples
-  
-      iex> buffer(1)
-      Buffer 1:
-      Hello, World!
-  """
-  def buffer(buffer_id, viewport_name \\ :main_viewport, graph_key \\ :main) do
-    with {:ok, viewport} <- get_viewport(viewport_name),
-         {:ok, content} <- Scenic.Semantic.Query.get_buffer_text(viewport, buffer_id, graph_key) do
-      IO.puts("Buffer #{buffer_id}:")
-      IO.puts(content)
-      :ok
-    else
-      error -> 
-        IO.puts("Error: #{inspect(error)}")
-        :error
-    end
-  end
-  
-  @doc """
-  Show all buttons in the viewport.
-  
-  ## Examples
-  
-      iex> buttons()
-      Buttons:
-      - "Save" (id: :save_btn)
-      - "Cancel" (id: :cancel_btn)
-  """
-  def buttons(viewport_name \\ :main_viewport, graph_key \\ :main) do
-    with {:ok, viewport} <- get_viewport(viewport_name),
-         {:ok, buttons} <- Scenic.Semantic.Query.get_buttons(viewport, graph_key) do
-      IO.puts("Buttons:")
-      Enum.each(buttons, fn button ->
-        label = button.semantic.label
-        id = button.id
-        IO.puts("- #{inspect(label)} (id: #{inspect(id)})")
-      end)
-      :ok
-    else
-      {:error, :not_found} -> 
-        IO.puts("No buttons found")
-        :ok
-      error -> 
-        IO.puts("Error: #{inspect(error)}")
-        :error
-    end
-  end
-  
-  @doc """
-  Find elements by semantic type.
-  
-  ## Examples
-  
-      iex> find(:menu)
-      Found 1 menu element(s):
-      - :main_menu: %{type: :menu, name: "File"}
-  """
-  def find(type, viewport_name \\ :main_viewport, graph_key \\ :main) do
-    with {:ok, viewport} <- get_viewport(viewport_name),
-         {:ok, elements} <- Scenic.Semantic.Query.find_by_type(viewport, type, graph_key) do
-      IO.puts("Found #{length(elements)} #{type} element(s):")
-      Enum.each(elements, fn elem ->
-        IO.puts("- #{inspect(elem.id)}: #{inspect(elem.semantic)}")
-      end)
-      :ok
-    else
-      {:error, :not_found} -> 
-        IO.puts("No #{type} elements found")
-        :ok
-      error -> 
-        IO.puts("Error: #{inspect(error)}")
-        :error
-    end
-  end
-  
-  @doc """
-  Get raw semantic data for a viewport.
-  
-  ## Examples
-  
-      iex> raw_semantic()
-      %{
-        elements: %{...},
-        by_type: %{...},
-        timestamp: 1234567890
-      }
-  """
-  def raw_semantic(viewport_name \\ :main_viewport, graph_key \\ :main) do
-    with {:ok, viewport} <- get_viewport(viewport_name),
-         {:ok, info} <- ViewPort.get_semantic(viewport, graph_key) do
-      info
-    else
-      error -> error
-    end
-  end
-  
-  @doc """
-  List all semantic types in use.
-  
-  ## Examples
-  
-      iex> types()
-      Semantic types in use:
-      - button (2 elements)
-      - text_buffer (1 element)
-      - menu (1 element)
-  """
-  def types(viewport_name \\ :main_viewport, graph_key \\ :main) do
-    with {:ok, viewport} <- get_viewport(viewport_name),
-         {:ok, info} <- ViewPort.get_semantic(viewport, graph_key) do
-      IO.puts("Semantic types in use:")
-      info.by_type
-      |> Enum.sort_by(fn {_type, ids} -> -length(ids) end)
-      |> Enum.each(fn {type, ids} ->
-        count = length(ids)
-        element_word = if count == 1, do: "element", else: "elements"
-        IO.puts("- #{type} (#{count} #{element_word})")
-      end)
-      :ok
-    else
-      error -> 
-        IO.puts("Error: #{inspect(error)}")
-        :error
-    end
-  end
-  
-  # =============================================================================
-  # Enhanced Tools (UUID-aware)
-  # =============================================================================
-  
-  @doc """
-  Display all semantic information across all graphs.
-  
-  This function works with UUID graph keys and shows semantic data
-  from all graphs in the viewport.
-  """
-  def semantic_all(viewport_name \\ :main_viewport) do
+  def semantic_summary(viewport_name \\ :main_viewport) do
     with {:ok, viewport} <- get_viewport(viewport_name) do
       entries = :ets.tab2list(viewport.semantic_table)
       
@@ -232,119 +159,174 @@ defmodule Scenic.DevTools do
         map_size(data.elements) > 0
       end)
       
-      if semantic_entries == [] do
-        IO.puts("No semantic information found in any graph")
+      # Collect all semantic elements across all graphs
+      all_elements = Enum.flat_map(semantic_entries, fn {_graph_key, data} ->
+        Map.values(data.elements)
+      end)
+      
+      total_elements = length(all_elements)
+      graph_count = length(semantic_entries)
+      
+      IO.puts("=== Semantic Summary ===")
+      IO.puts("Total semantic elements: #{total_elements} across #{graph_count} graphs")
+      IO.puts("")
+      
+      if total_elements == 0 do
+        IO.puts("No semantic annotations found.")
+        IO.puts("Add semantic metadata to your components:")
+        IO.puts("  |> rect({100, 40}, semantic: %{type: :button, label: \"Save\"})")
       else
-        IO.puts("=== Semantic Information Across All Graphs ===")
-        IO.puts("Found #{length(semantic_entries)} graphs with semantic data\n")
+        # Group by type
+        by_type = Enum.group_by(all_elements, fn elem -> elem.semantic.type end)
         
-        Enum.each(semantic_entries, fn {graph_key, data} ->
-          IO.puts("Graph: #{graph_key}")
-          IO.puts("Elements: #{map_size(data.elements)}")
-          
-          if map_size(data.by_type) > 0 do
-            IO.puts("By type:")
-            Enum.each(data.by_type, fn {type, ids} ->
-              IO.puts("  #{type}: #{length(ids)} element(s)")
-              
-              # Show details for each element
-              Enum.each(ids, fn id ->
-                elem = Map.get(data.elements, id)
-                case type do
-                  :text_buffer ->
-                    IO.puts("    - Buffer #{elem.semantic.buffer_id}")
-                    content_preview = String.slice(elem.content || "", 0, 50)
-                    if content_preview != "", do: IO.puts("      Content: #{inspect(content_preview)}")
-                    
-                  :button ->
-                    IO.puts("    - Button: #{elem.semantic.label}")
-                    
-                  _ ->
-                    IO.puts("    - #{inspect(elem.semantic)}")
-                end
-              end)
-            end)
-          end
+        IO.puts("By type:")
+        by_type
+        |> Enum.sort_by(fn {_type, elems} -> -length(elems) end)
+        |> Enum.each(fn {type, elements} ->
+          IO.puts("  #{type}: #{length(elements)} elements")
+        end)
+      end
+      
+      :ok
+    end
+  end
+  
+  @doc """
+  Find all semantic elements of a given type across all graphs.
+  
+  ## Examples
+  
+      iex> find_semantic(:button)
+      === Elements of type :button ===
+      Found 3 elements:
+      
+      Graph "abc123...":
+        - %{type: :button, label: "Save"}
+        - %{type: :button, label: "Cancel"}
+      
+      Graph "def456...":
+        - %{type: :button, label: "Submit"}
+  """
+  def find_semantic(type, viewport_name \\ :main_viewport) do
+    with {:ok, viewport} <- get_viewport(viewport_name) do
+      entries = :ets.tab2list(viewport.semantic_table)
+      
+      # Find all elements of this type
+      results = Enum.flat_map(entries, fn {graph_key, data} ->
+        element_ids = Map.get(data.by_type, type, [])
+        
+        elements = Enum.map(element_ids, fn id ->
+          elem = Map.get(data.elements, id)
+          {graph_key, elem}
+        end)
+        
+        if elements == [], do: [], else: [{graph_key, elements}]
+      end)
+      
+      IO.puts("=== Elements of type #{inspect(type)} ===")
+      
+      if results == [] do
+        IO.puts("No elements found")
+      else
+        total = Enum.reduce(results, 0, fn {_, elems}, acc -> acc + length(elems) end)
+        IO.puts("Found #{total} elements:")
+        IO.puts("")
+        
+        Enum.each(results, fn {graph_key, elements} ->
+          IO.puts("Graph \"#{short_id(graph_key)}\":")
+          Enum.each(elements, fn {_graph_key, elem} ->
+            IO.puts("  - #{inspect(elem.semantic)}")
+          end)
           IO.puts("")
         end)
       end
+      
       :ok
+    else
+      error -> 
+        IO.puts("Error: #{inspect(error)}")
+        :error
     end
   end
   
   @doc """
-  Show all text buffers across all graphs.
-  """
-  def buffers_all(viewport_name \\ :main_viewport) do
-    with {:ok, viewport} <- get_viewport(viewport_name) do
-      entries = :ets.tab2list(viewport.semantic_table)
-      
-      # Find all text buffers
-      all_buffers = Enum.flat_map(entries, fn {graph_key, data} ->
-        buffer_ids = Map.get(data.by_type, :text_buffer, [])
-        
-        Enum.map(buffer_ids, fn id ->
-          elem = Map.get(data.elements, id)
-          %{
-            graph_key: graph_key,
-            buffer_id: elem.semantic.buffer_id,
-            content: elem.content || "",
-            semantic: elem.semantic
-          }
-        end)
-      end)
-      
-      if all_buffers == [] do
-        IO.puts("No text buffers found")
-      else
-        IO.puts("Text Buffers:")
-        Enum.each(all_buffers, fn buffer ->
-          content_preview = String.slice(buffer.content, 0, 60)
-          content_preview = if String.length(buffer.content) > 60, do: content_preview <> "...", else: content_preview
-          
-          IO.puts("\n[Buffer: #{buffer.buffer_id}]")
-          IO.puts("Graph: #{buffer.graph_key}")
-          IO.puts("Content: #{inspect(content_preview)}")
-        end)
-      end
-      :ok
-    end
-  end
+  Inspect a specific scene showing its graph and semantic data.
   
-  @doc """
-  Get content of a specific buffer by UUID.
+  ## Examples
+  
+      iex> inspect_scene("_main_")
+      === Scene: "_main_" ===
+      Module: Flamelex.GUI.RootScene
+      Graph ID: "_root_"
+      Child scenes: 4
+      
+      Semantic elements in graph:
+        - button: "File" menu
+        - button: "Edit" menu
   """
-  def buffer_by_uuid(buffer_uuid, viewport_name \\ :main_viewport) do
+  def inspect_scene(scene_id, viewport_name \\ :main_viewport) do
     with {:ok, viewport} <- get_viewport(viewport_name) do
-      entries = :ets.tab2list(viewport.semantic_table)
-      
-      # Search for the buffer
-      result = Enum.find_value(entries, fn {_graph_key, data} ->
-        buffer_ids = Map.get(data.by_type, :text_buffer, [])
-        
-        Enum.find_value(buffer_ids, fn id ->
-          elem = Map.get(data.elements, id)
-          if elem.semantic.buffer_id == buffer_uuid do
-            elem.content || ""
-          end
-        end)
-      end)
-      
-      case result do
-        nil -> 
-          IO.puts("Buffer #{buffer_uuid} not found")
+      case Map.get(viewport.scenes_by_id, scene_id) do
+        nil ->
+          IO.puts("Scene \"#{scene_id}\" not found")
+          available = Map.keys(viewport.scenes_by_id)
+          IO.puts("\nAvailable scenes: #{inspect(available)}")
           :error
-        content ->
-          IO.puts("Buffer #{buffer_uuid}:")
-          IO.puts(content)
+          
+        {pid, parent_pid} ->
+          # Get scene info from pid map
+          {^scene_id, _parent_id, module} = Map.get(viewport.scenes_by_pid, pid)
+          
+          IO.puts("=== Scene: \"#{scene_id}\" ===")
+          IO.puts("Module: #{inspect(module)}")
+          IO.puts("PID: #{inspect(pid)}")
+          if parent_pid, do: IO.puts("Parent PID: #{inspect(parent_pid)}")
+          
+          # Find the graph for this scene
+          scripts = :ets.tab2list(viewport.script_table)
+          scene_graphs = Enum.filter(scripts, fn {_id, _script, owner} -> owner == pid end)
+          
+          if scene_graphs != [] do
+            IO.puts("\nGraphs owned by this scene:")
+            Enum.each(scene_graphs, fn {graph_id, _script, _owner} ->
+              IO.puts("  Graph ID: \"#{short_id(graph_id)}\"")
+              
+              # Check semantic data
+              case :ets.lookup(viewport.semantic_table, graph_id) do
+                [{^graph_id, data}] when map_size(data.elements) > 0 ->
+                  IO.puts("    Semantic elements:")
+                  Enum.each(data.by_type, fn {type, ids} ->
+                    IO.puts("      - #{type}: #{length(ids)} element(s)")
+                  end)
+                _ ->
+                  IO.puts("    No semantic data")
+              end
+            end)
+          end
+          
+          # Find child scenes
+          children = Enum.filter(viewport.scenes_by_pid, fn {child_pid, _} ->
+            case Map.get(viewport.scenes_by_id, Map.get(viewport.scenes_by_pid, child_pid) |> elem(0)) do
+              {^child_pid, ^pid} -> true
+              _ -> false
+            end
+          end)
+          
+          if children != [] do
+            IO.puts("\nChild scenes: #{length(children)}")
+            Enum.each(children, fn {_child_pid, {child_id, _, child_module}} ->
+              IO.puts("  - \"#{child_id}\" (#{inspect(child_module)})")
+            end)
+          end
+          
           :ok
       end
+    else
+      error -> 
+        IO.puts("Error: #{inspect(error)}")
+        :error
     end
   end
-  
-  # =============================================================================
-  # High-Level Inspector (Browser Dev Tools Style)
-  # =============================================================================
   
   @doc """
   Inspect your entire Scenic application like browser dev tools.
@@ -540,6 +522,79 @@ defmodule Scenic.DevTools do
   # Private Helpers
   # =============================================================================
   
+  # Private helper to build scene tree
+  defp build_scene_tree(viewport) do
+    # Find root scene
+    root_entry = Enum.find(viewport.scenes_by_id, fn {id, _} -> 
+      id == "_main_" 
+    end)
+    
+    case root_entry do
+      {root_id, {root_pid, _parent}} ->
+        {^root_id, _parent_id, module} = Map.get(viewport.scenes_by_pid, root_pid)
+        build_scene_node(root_id, root_pid, module, viewport)
+      nil ->
+        nil
+    end
+  end
+  
+  defp build_scene_node(id, pid, module, viewport) do
+    # Find children of this scene
+    children = Enum.filter(viewport.scenes_by_id, fn {_child_id, {_child_pid, parent_pid}} ->
+      parent_pid == pid
+    end)
+    
+    # Build child nodes
+    child_nodes = Enum.map(children, fn {child_id, {child_pid, _}} ->
+      {^child_id, _, child_module} = Map.get(viewport.scenes_by_pid, child_pid)
+      build_scene_node(child_id, child_pid, child_module, viewport)
+    end)
+    
+    %{
+      id: id,
+      pid: pid,
+      module: module,
+      children: child_nodes
+    }
+  end
+  
+  defp render_scene_node(node, prefix) do
+    # Determine if this is the last child at this level
+    is_root = prefix == ""
+    
+    # Render this node
+    icon = if node.id == "_main_", do: "📊", else: "📄"
+    label = if node.id == "_main_", do: "Root Scene: ", else: ""
+    
+    if is_root do
+      IO.puts("#{icon} #{label}\"#{node.id}\" (#{inspect(node.module)})")
+    else
+      IO.puts("#{prefix}#{icon} \"#{node.id}\" (#{inspect(node.module)})")
+    end
+    
+    # Render children
+    Enum.with_index(node.children, fn child, index ->
+      is_last = index == length(node.children) - 1
+      
+      {child_prefix, next_prefix} = if is_root do
+        child_prefix = if is_last, do: "└── ", else: "├── "
+        next_prefix = if is_last, do: "    ", else: "│   "
+        {child_prefix, next_prefix}
+      else
+        child_prefix = if is_last, do: "#{prefix}└── ", else: "#{prefix}├── "
+        next_prefix = if is_last, do: "#{prefix}    ", else: "#{prefix}│   "
+        {child_prefix, next_prefix}
+      end
+      
+      render_scene_node(child, child_prefix)
+      
+      # Continue with grandchildren using the appropriate prefix
+      Enum.each(child.children, fn grandchild ->
+        render_scene_node(grandchild, next_prefix)
+      end)
+    end)
+  end
+  
   defp render_graph_tree(all_entries) do
     {graphs_with_semantic, graphs_without} = Enum.split_with(all_entries, fn {_key, data} ->
       map_size(data.elements) > 0
@@ -659,6 +714,20 @@ defmodule Scenic.DevTools do
     Calendar.strftime(datetime, "%Y-%m-%d %H:%M:%S")
   end
   defp format_timestamp(_), do: "unknown"
+  
+  # Helper to find scene info by pid
+  defp find_scene_by_pid(viewport, pid) do
+    case Map.get(viewport.scenes_by_pid, pid) do
+      {id, _parent_id, module} -> {id, module}
+      nil -> nil
+    end
+  end
+  
+  # Helper to shorten long IDs
+  defp short_id(id) when byte_size(id) > 12 do
+    String.slice(id, 0, 8) <> "..."
+  end
+  defp short_id(id), do: id
   
   defp get_viewport(viewport) when is_struct(viewport, ViewPort), do: {:ok, viewport}
   defp get_viewport(name) when is_atom(name) do
