@@ -115,6 +115,7 @@ defmodule Scenic.ViewPort do
           # name_table: reference,
           script_table: reference,
           semantic_table: reference,
+          scene_script_table: reference,
           size: {number, number}
         }
   defstruct name: nil,
@@ -122,6 +123,7 @@ defmodule Scenic.ViewPort do
             # name_table: nil,
             script_table: nil,
             semantic_table: nil,
+            scene_script_table: nil,
             size: nil
 
   @viewports :scenic_viewports
@@ -535,7 +537,7 @@ defmodule Scenic.ViewPort do
           graph :: Graph.t(),
           opts :: Keyword.t()
         ) :: {:ok, name :: any} | {:error, atom}
-  def put_graph(%ViewPort{pid: pid, semantic_table: semantic_table} = viewport, name, %Graph{} = graph, opts \\ []) do
+  def put_graph(%ViewPort{pid: pid, semantic_table: semantic_table, scene_script_table: scene_script_table} = viewport, name, %Graph{} = graph, opts \\ []) do
     opts =
       opts
       |> Enum.into([])
@@ -563,6 +565,13 @@ defmodule Scenic.ViewPort do
           # Build and store semantic information
           semantic_info = build_semantic_info(graph, name)
           true = :ets.insert(semantic_table, {name, semantic_info})
+          
+          # Build and store enhanced scene script information
+          scene_script_info = build_scene_script_info(graph, name, script, %{})
+          true = :ets.insert(scene_script_table, {name, scene_script_info})
+          
+          # Recompute hierarchy for all graphs after each update
+          recompute_scene_script_hierarchy(scene_script_table)
 
           # send the input list to the viewport
           GenServer.cast(pid, {:input_list, input_list, name, owner})
@@ -732,6 +741,7 @@ defmodule Scenic.ViewPort do
     # name_table = :ets.new(:_vp_name_table_, [:protected])
     script_table = :ets.new(:_vp_script_table_, [:public, {:read_concurrency, true}])
     semantic_table = :ets.new(:_vp_semantic_table_, [:public, {:read_concurrency, true}])
+    scene_script_table = :ets.new(:_vp_scene_script_table_, [:public, {:read_concurrency, true}])
 
     state = %{
       # simple metadata about the ViewPort
@@ -770,6 +780,7 @@ defmodule Scenic.ViewPort do
       # finished scripts to the VP for writing.
       script_table: script_table,
       semantic_table: semantic_table,
+      scene_script_table: scene_script_table,
 
       # state related to input from drivers to scenes
       # input lists are generated when a scene pushes a graph. Primitives
@@ -1413,6 +1424,7 @@ defmodule Scenic.ViewPort do
          # name_table: name_table,
          script_table: script_table,
          semantic_table: semantic_table,
+         scene_script_table: scene_script_table,
          size: size
        }) do
     %ViewPort{
@@ -1421,6 +1433,7 @@ defmodule Scenic.ViewPort do
       # name_table: name_table,
       script_table: script_table,
       semantic_table: semantic_table,
+      scene_script_table: scene_script_table,
       size: size
     }
   end
@@ -1467,7 +1480,7 @@ defmodule Scenic.ViewPort do
   defp internal_put_graph(
          %Graph{} = graph,
          name,
-         %{input_lists: ils, script_table: script_table, semantic_table: semantic_table} = state
+         %{input_lists: ils, script_table: script_table, semantic_table: semantic_table, scene_script_table: scene_script_table} = state
        ) do
     state =
       with {:ok, script} <- GraphCompiler.compile(graph),
@@ -1485,6 +1498,13 @@ defmodule Scenic.ViewPort do
             # Build and store semantic information
             semantic_info = build_semantic_info(graph, name)
             true = :ets.insert(semantic_table, {name, semantic_info})
+            
+            # Build and store enhanced scene script information
+            scene_script_info = build_scene_script_info(graph, name, script, state)
+            true = :ets.insert(scene_script_table, {name, scene_script_info})
+            
+            # Recompute hierarchy for all graphs after each update
+            recompute_scene_script_hierarchy(scene_script_table)
             
             :ok
         end
@@ -2105,6 +2125,257 @@ defmodule Scenic.ViewPort do
       # Quick access indices
       by_type: group_elements_by_semantic_type(elements)
     }
+  end
+
+  # Build enhanced scene script information with hierarchy and metadata
+  defp build_scene_script_info(graph, graph_key, script, state) do
+    # Extract all elements (not just semantic ones)
+    elements = extract_all_elements(graph)
+    
+    # Extract script references for hierarchy
+    children = extract_script_references(script)
+    
+    # Debug output (removed for production)
+    
+    # Build enhanced element data
+    enhanced_elements = enhance_elements(elements, graph)
+    
+    %{
+      # === HIERARCHY INFORMATION ===
+      graph_key: graph_key,
+      children: children,
+      parent: nil,                    # Will be computed during hierarchy pass
+      depth: 0,                      # Will be computed during hierarchy pass
+      render_order: 0,               # Will be computed during hierarchy pass
+      
+      # === METADATA ===
+      timestamp: System.system_time(:millisecond),
+      owner_pid: determine_owner_pid(state),
+      
+      # === VISUAL INFORMATION ===
+      transforms: extract_graph_transforms(script),
+      bounds: %{x: 0, y: 0, w: 0, h: 0},  # Will be computed from primitives
+      
+      # === ELEMENTS (Enhanced from current semantic system) ===
+      elements: enhanced_elements,
+      
+      # === FAST LOOKUPS ===
+      by_type: group_elements_by_semantic_type(enhanced_elements),
+      by_role: group_elements_by_role(enhanced_elements),
+      by_primitive: group_elements_by_primitive_type(enhanced_elements)
+    }
+  end
+
+  # Extract all primitives, not just those with semantic data
+  defp extract_all_elements(graph) do
+    graph.primitives
+    |> Enum.reduce(%{}, fn {id, primitive}, acc ->
+      element_info = %{
+        id: id,
+        type: primitive.module,
+        primitive_data: primitive.data,
+        transforms: primitive.transforms,
+        
+        # Semantic data (if present)
+        semantic: extract_semantic_data(primitive),
+        
+        # Content (for text primitives)
+        content: extract_content(primitive),
+        
+        # Computed properties for automation
+        clickable: is_clickable_primitive(primitive),
+        visible: true,  # Will be computed based on transforms/clips
+        text_selectable: is_text_selectable(primitive)
+      }
+      Map.put(acc, id, element_info)
+    end)
+  end
+
+  # Extract semantic data from primitive options
+  defp extract_semantic_data(primitive) do
+    case Map.get(primitive, :opts) do
+      nil -> %{}
+      opts when is_list(opts) -> Keyword.get(opts, :semantic, %{})
+      _ -> %{}
+    end
+  end
+
+  # Extract script references from compiled script
+  defp extract_script_references(script) when is_list(script) do
+    references = script
+    |> Enum.filter(fn
+      {:script, _child_key} -> true
+      _ -> false
+    end)
+    |> Enum.map(fn {:script, key} -> key end)
+    |> Enum.uniq()
+    
+    # Debug output (removed for production)
+    
+    references
+  end
+  defp extract_script_references(_), do: []
+
+  # Extract graph-level transforms from script
+  defp extract_graph_transforms(script) when is_list(script) do
+    script
+    |> Enum.filter(fn
+      {:push_transform, _} -> true
+      {:translate, _} -> true
+      {:scale, _} -> true
+      {:rotate, _} -> true
+      _ -> false
+    end)
+  end
+  defp extract_graph_transforms(_), do: []
+
+  # Enhance elements with computed properties
+  defp enhance_elements(elements, _graph) do
+    # For now, just return elements as-is
+    # TODO: Add bounds calculation, visibility computation, etc.
+    elements
+  end
+
+  # Determine if primitive is clickable
+  defp is_clickable_primitive(%{module: Scenic.Primitive.RoundedRectangle}), do: true
+  defp is_clickable_primitive(%{module: Scenic.Primitive.Rectangle}), do: true
+  defp is_clickable_primitive(%{module: Scenic.Primitive.Circle}), do: true
+  defp is_clickable_primitive(%{module: Scenic.Primitive.Ellipse}), do: true
+  defp is_clickable_primitive(primitive) do
+    # Check if primitive has semantic role that suggests clickability
+    semantic = extract_semantic_data(primitive)
+    case Map.get(semantic, :role) do
+      :button -> true
+      :link -> true
+      _ -> false
+    end
+  end
+
+  # Determine if primitive contains selectable text
+  defp is_text_selectable(%{module: Scenic.Primitive.Text}), do: true
+  defp is_text_selectable(primitive) do
+    semantic = extract_semantic_data(primitive)
+    Map.get(semantic, :type) == :text_buffer
+  end
+
+  # Group elements by accessibility role
+  defp group_elements_by_role(elements) do
+    elements
+    |> Enum.reduce(%{}, fn {id, element}, acc ->
+      if role = get_in(element, [:semantic, :role]) do
+        Map.update(acc, role, [id], &[id | &1])
+      else
+        acc
+      end
+    end)
+  end
+
+  # Group elements by primitive type
+  defp group_elements_by_primitive_type(elements) do
+    elements
+    |> Enum.reduce(%{}, fn {id, element}, acc ->
+      primitive_type = element.type
+      Map.update(acc, primitive_type, [id], &[id | &1])
+    end)
+  end
+
+  # Determine owner PID from state
+  defp determine_owner_pid(_state) do
+    # For now, return nil - this would need access to the owner info
+    # from the graph insertion context
+    nil
+  end
+
+  # Recompute hierarchy relationships for all scene scripts
+  defp recompute_scene_script_hierarchy(scene_script_table) do
+    # Get all current scene script entries
+    entries = :ets.tab2list(scene_script_table)
+    
+    # Build parent/child relationships and compute depths
+    updated_entries = compute_hierarchy_relationships(entries)
+    
+    # Update all entries with new hierarchy information
+    Enum.each(updated_entries, fn {key, updated_data} ->
+      :ets.insert(scene_script_table, {key, updated_data})
+    end)
+  end
+
+  # Compute parent/child relationships and depths for all scene scripts
+  defp compute_hierarchy_relationships(entries) do
+    # Create a map for easier lookups
+    data_map = Map.new(entries)
+    
+    # Build parent relationships by finding who references each graph
+    entries_with_parents = Enum.map(entries, fn {key, data} ->
+      parent = find_parent_graph(key, data_map)
+      updated_data = Map.put(data, :parent, parent)
+      {key, updated_data}
+    end)
+    
+    # Compute depths starting from root nodes
+    entries_with_depths = compute_depths(entries_with_parents)
+    
+    entries_with_depths
+  end
+
+  # Find which graph references this one as a child
+  defp find_parent_graph(target_key, data_map) do
+    Enum.find_value(data_map, fn {graph_key, graph_data} ->
+      if target_key in graph_data.children do
+        graph_key
+      else
+        nil
+      end
+    end)
+  end
+
+  # Compute depth for each graph based on its position in the hierarchy
+  defp compute_depths(entries_with_parents) do
+    data_map = Map.new(entries_with_parents)
+    
+    # Find root graphs (no parent)
+    roots = Enum.filter(entries_with_parents, fn {_key, data} ->
+      data.parent == nil
+    end)
+    
+    # Assign depths starting from roots
+    depth_assignments = compute_depths_recursive(roots, data_map, %{}, 0)
+    
+    # Apply depth assignments to all entries
+    Enum.map(entries_with_parents, fn {key, data} ->
+      depth = Map.get(depth_assignments, key, 0)
+      updated_data = Map.put(data, :depth, depth)
+      {key, updated_data}
+    end)
+  end
+
+  # Recursively compute depths for the hierarchy
+  defp compute_depths_recursive(nodes, data_map, depth_map, current_depth) do
+    # Assign current depth to all nodes at this level
+    updated_depth_map = Enum.reduce(nodes, depth_map, fn {key, _data}, acc ->
+      Map.put(acc, key, current_depth)
+    end)
+    
+    # Find all children of current nodes
+    children = Enum.flat_map(nodes, fn {key, data} ->
+      data.children
+      |> Enum.map(fn child_key ->
+        child_data = Map.get(data_map, child_key)
+        if child_data do
+          {child_key, child_data}
+        else
+          nil
+        end
+      end)
+      |> Enum.filter(& &1)
+    end)
+    
+    # Recurse for children if any exist
+    if children != [] do
+      compute_depths_recursive(children, data_map, updated_depth_map, current_depth + 1)
+    else
+      updated_depth_map
+    end
   end
 
   defp extract_content(%{module: Scenic.Primitive.Text, data: text}), do: text
