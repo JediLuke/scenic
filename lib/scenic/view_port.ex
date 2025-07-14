@@ -114,12 +114,14 @@ defmodule Scenic.ViewPort do
           pid: pid,
           # name_table: reference,
           script_table: reference,
+          semantic_table: reference,
           size: {number, number}
         }
   defstruct name: nil,
             pid: nil,
             # name_table: nil,
             script_table: nil,
+            semantic_table: nil,
             size: nil
 
   @viewports :scenic_viewports
@@ -533,7 +535,7 @@ defmodule Scenic.ViewPort do
           graph :: Graph.t(),
           opts :: Keyword.t()
         ) :: {:ok, name :: any} | {:error, atom}
-  def put_graph(%ViewPort{pid: pid} = viewport, name, %Graph{} = graph, opts \\ []) do
+  def put_graph(%ViewPort{pid: pid, semantic_table: semantic_table} = viewport, name, %Graph{} = graph, opts \\ []) do
     opts =
       opts
       |> Enum.into([])
@@ -557,6 +559,10 @@ defmodule Scenic.ViewPort do
           # write the script to the table
           # this notifies the drivers...
           put_script(viewport, name, script, owner: owner)
+          
+          # Build and store semantic information
+          semantic_info = build_semantic_info(graph, name)
+          true = :ets.insert(semantic_table, {name, semantic_info})
 
           # send the input list to the viewport
           GenServer.cast(pid, {:input_list, input_list, name, owner})
@@ -660,6 +666,53 @@ defmodule Scenic.ViewPort do
   end
 
   # --------------------------------------------------------
+  @doc """
+  Get the semantic information for a graph in the viewport.
+  
+  This is useful during development to inspect what semantic annotations
+  are available for testing.
+  
+  ## Examples
+  
+      iex> ViewPort.get_semantic(viewport)
+      {:ok, %{elements: %{...}, by_type: %{...}}}
+      
+      iex> ViewPort.get_semantic(viewport, :specific_graph)
+      {:ok, %{...}}
+  """
+  @spec get_semantic(viewport :: ViewPort.t(), graph_key :: any) :: 
+          {:ok, map} | {:error, :no_semantic_info}
+  def get_semantic(%ViewPort{pid: pid}, graph_key \\ :main) do
+    GenServer.call(pid, {:get_semantic, graph_key})
+  end
+
+  # --------------------------------------------------------
+  @doc """
+  Inspect all semantic information in the viewport.
+  
+  This prints a formatted view of all semantic elements, making it easy
+  to see what's available during development.
+  
+  ## Examples
+  
+      iex> ViewPort.inspect_semantic(viewport)
+      === Semantic Tree for :main ===
+      Total elements: 5
+      
+      By type:
+        button: 2 elements
+          - :submit_btn: %{type: :button, label: "Submit"}
+          - :cancel_btn: %{type: :button, label: "Cancel"}
+        text_buffer: 1 element
+          - :buffer_1: %{type: :text_buffer, buffer_id: 1}
+      :ok
+  """
+  @spec inspect_semantic(viewport :: ViewPort.t(), graph_key :: any) :: :ok
+  def inspect_semantic(%ViewPort{} = viewport, graph_key \\ :main) do
+    Scenic.Semantic.Query.inspect_semantic_tree(viewport, graph_key)
+  end
+
+  # --------------------------------------------------------
   @doc false
   def start_link(opts) do
     case opts[:name] do
@@ -677,6 +730,7 @@ defmodule Scenic.ViewPort do
     # script_table = :ets.new( make_ref(), [:public, {:read_concurrency, true}] )
     # name_table = :ets.new(:_vp_name_table_, [:protected])
     script_table = :ets.new(:_vp_script_table_, [:public, {:read_concurrency, true}])
+    semantic_table = :ets.new(:_vp_semantic_table_, [:public, {:read_concurrency, true}])
 
     state = %{
       # simple metadata about the ViewPort
@@ -714,6 +768,7 @@ defmodule Scenic.ViewPort do
       # becomes problematic, the next step is to have the scripts compile, then send
       # finished scripts to the VP for writing.
       script_table: script_table,
+      semantic_table: semantic_table,
 
       # state related to input from drivers to scenes
       # input lists are generated when a scene pushes a graph. Primitives
@@ -1251,6 +1306,16 @@ defmodule Scenic.ViewPort do
     {:reply, :_pong_, scene}
   end
 
+  # --------------------------------------------------------
+  # Semantic information access
+  def handle_call({:get_semantic, graph_key}, _from, %{semantic_table: semantic_table} = state) do
+    result = case :ets.lookup(semantic_table, graph_key) do
+      [{^graph_key, info}] -> {:ok, info}
+      [] -> {:error, :no_semantic_info}
+    end
+    {:reply, result, state}
+  end
+
   def handle_call(invalid, from, %{name: name} = state) do
     Logger.error("""
     ViewPort #{inspect(name || self())} ignored bad call
@@ -1346,6 +1411,7 @@ defmodule Scenic.ViewPort do
          name: name,
          # name_table: name_table,
          script_table: script_table,
+         semantic_table: semantic_table,
          size: size
        }) do
     %ViewPort{
@@ -1353,6 +1419,7 @@ defmodule Scenic.ViewPort do
       name: name,
       # name_table: name_table,
       script_table: script_table,
+      semantic_table: semantic_table,
       size: size
     }
   end
@@ -1399,7 +1466,7 @@ defmodule Scenic.ViewPort do
   defp internal_put_graph(
          %Graph{} = graph,
          name,
-         %{input_lists: ils, script_table: script_table} = state
+         %{input_lists: ils, script_table: script_table, semantic_table: semantic_table} = state
        ) do
     state =
       with {:ok, script} <- GraphCompiler.compile(graph),
@@ -1413,6 +1480,11 @@ defmodule Scenic.ViewPort do
           # it isn't there or has changed
           _ ->
             true = :ets.insert(script_table, {name, script, :viewport})
+            
+            # Build and store semantic information
+            semantic_info = build_semantic_info(graph, name)
+            true = :ets.insert(semantic_table, {name, semantic_info})
+            
             :ok
         end
 
@@ -1994,5 +2066,57 @@ defmodule Scenic.ViewPort do
         # No hit here. Keep going
         do_find_hit(tail, input_type, gp, lists, name, parent_tx)
     end
+  end
+
+  # Build semantic information from a graph
+  defp build_semantic_info(graph, graph_key) do
+    elements = 
+      graph.primitives
+      |> Enum.reduce(%{}, fn {id, primitive}, acc ->
+        # Extract semantic data if present - use direct access for struct fields
+        # Check if primitive has opts field and it contains semantic data
+        semantic = case Map.get(primitive, :opts) do
+          nil -> nil
+          opts when is_list(opts) -> Keyword.get(opts, :semantic)
+          _ -> nil
+        end
+        
+        if semantic do
+          element_info = %{
+            id: id,
+            type: primitive.module,
+            semantic: semantic,
+            # Extract text content for text primitives
+            content: extract_content(primitive),
+            # Store transform for position info if needed
+            transforms: primitive.transforms
+          }
+          Map.put(acc, id, element_info)
+        else
+          acc
+        end
+      end)
+    
+    %{
+      graph_key: graph_key,
+      timestamp: System.system_time(:millisecond),
+      elements: elements,
+      # Quick access indices
+      by_type: group_elements_by_semantic_type(elements)
+    }
+  end
+
+  defp extract_content(%{module: Scenic.Primitive.Text, data: text}), do: text
+  defp extract_content(_), do: nil
+
+  defp group_elements_by_semantic_type(elements) do
+    elements
+    |> Enum.reduce(%{}, fn {id, element}, acc ->
+      if type = get_in(element, [:semantic, :type]) do
+        Map.update(acc, type, [id], &[id | &1])
+      else
+        acc
+      end
+    end)
   end
 end

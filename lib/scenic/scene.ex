@@ -1512,6 +1512,21 @@ defmodule Scenic.Scene do
     end
   end
 
+  # def handle_call(:get_graph, _from, %Scene{assigns: assigns} = scene) do
+  #   # Default implementation for graph introspection
+  #   # Scenes can override this by implementing their own handle_call(:get_graph, ...)
+  #   graph_info = %{
+  #     module: scene.module,
+  #     id: scene.id,
+  #     # Look for common graph storage patterns
+  #     graph: Map.get(assigns, :graph),
+  #     graphs: Map.get(assigns, :graphs),
+  #     # Include any other potentially useful info
+  #     assigns_keys: Map.keys(assigns)
+  #   }
+  #   {:reply, {:ok, graph_info}, scene}
+  # end
+
   # --------------------------------------------------------
   # generic handle_call. give the scene a chance to handle it
   def handle_call(msg, from, %Scene{module: module} = scene) do
