@@ -95,10 +95,8 @@ defmodule Scenic do
   
   ## Examples
   
-      iex> Scenic.semantic()
-      === Semantic Tree for :main ===
-      Total elements: 3
-      ...
+      Scenic.semantic()
+      # Prints semantic tree information to console
   """
   defdelegate semantic(viewport_name \\ :main_viewport, graph_key \\ :main), 
     to: Scenic.DevTools
@@ -110,10 +108,8 @@ defmodule Scenic do
   
   ## Examples
   
-      iex> Scenic.buffers()
-      Text Buffers:
-      [1] "Hello, World!"
-      ...
+      Scenic.buffers()
+      # Prints text buffer information to console
   """
   defdelegate buffers(viewport_name \\ :main_viewport, graph_key \\ :main), 
     to: Scenic.DevTools
@@ -125,9 +121,8 @@ defmodule Scenic do
   
   ## Examples
   
-      iex> Scenic.buffer(1)
-      Buffer 1:
-      Hello, World!
+      Scenic.buffer(1)
+      # Prints content of buffer 1 to console
   """
   defdelegate buffer(buffer_id, viewport_name \\ :main_viewport, graph_key \\ :main), 
     to: Scenic.DevTools
@@ -139,10 +134,8 @@ defmodule Scenic do
   
   ## Examples
   
-      iex> Scenic.buttons()
-      Buttons:
-      - "Save" (id: :save_btn)
-      ...
+      Scenic.buttons()
+      # Prints button information to console
   """
   defdelegate buttons(viewport_name \\ :main_viewport, graph_key \\ :main), 
     to: Scenic.DevTools
@@ -154,9 +147,8 @@ defmodule Scenic do
   
   ## Examples
   
-      iex> Scenic.find(:menu)
-      Found 1 menu element(s):
-      - :main_menu: %{type: :menu, name: "File"}
+      Scenic.find(:menu)
+      # Finds and prints menu elements
   """
   defdelegate find(type, viewport_name \\ :main_viewport, graph_key \\ :main), 
     to: Scenic.DevTools
@@ -168,11 +160,50 @@ defmodule Scenic do
   
   ## Examples
   
-      iex> Scenic.types()
-      Semantic types in use:
-      - button (2 elements)
-      - text_buffer (1 element)
+      Scenic.types()
+      # Lists all semantic types in use
   """
   defdelegate types(viewport_name \\ :main_viewport, graph_key \\ :main), 
     to: Scenic.DevTools
+
+  # High-level inspection tools
+  
+  @doc """
+  Inspect your entire Scenic application like browser dev tools.
+  
+  Shows a hierarchical view starting from the ViewPort with all scenes,
+  graphs, and semantic annotations. Perfect for understanding your app structure.
+  
+  ## Examples
+  
+      Scenic.inspect_app()
+      # Shows hierarchical view of your entire app
+  """
+  defdelegate inspect_app(viewport_name \\ :main_viewport),
+    to: Scenic.DevToolsInspector
+    
+  @doc """
+  Show just the semantic content in your app.
+  
+  Like a simplified view showing "what semantic stuff is in my app?"
+  Perfect for beginners.
+  
+  ## Examples
+  
+      Scenic.show_semantic()
+      # Shows all semantic content grouped by type
+  """
+  defdelegate show_semantic(viewport_name \\ :main_viewport),
+    to: Scenic.DevToolsInspector, as: :show_semantic_content
+    
+  @doc """
+  Inspect a specific graph in detail.
+  
+  ## Examples
+  
+      Scenic.inspect_graph("ABC123...")
+      # Shows detailed view of one graph
+  """
+  defdelegate inspect_graph(graph_key, viewport_name \\ :main_viewport),
+    to: Scenic.DevToolsInspector
 end

@@ -674,11 +674,11 @@ defmodule Scenic.ViewPort do
   
   ## Examples
   
-      iex> ViewPort.get_semantic(viewport)
-      {:ok, %{elements: %{...}, by_type: %{...}}}
+      ViewPort.get_semantic(viewport)
+      # => {:ok, %{elements: %{...}, by_type: %{...}}}
       
-      iex> ViewPort.get_semantic(viewport, :specific_graph)
-      {:ok, %{...}}
+      ViewPort.get_semantic(viewport, :specific_graph)
+      # => {:ok, %{...}}
   """
   @spec get_semantic(viewport :: ViewPort.t(), graph_key :: any) :: 
           {:ok, map} | {:error, :no_semantic_info}
@@ -695,17 +695,18 @@ defmodule Scenic.ViewPort do
   
   ## Examples
   
-      iex> ViewPort.inspect_semantic(viewport)
-      === Semantic Tree for :main ===
-      Total elements: 5
-      
-      By type:
-        button: 2 elements
-          - :submit_btn: %{type: :button, label: "Submit"}
-          - :cancel_btn: %{type: :button, label: "Cancel"}
-        text_buffer: 1 element
-          - :buffer_1: %{type: :text_buffer, buffer_id: 1}
-      :ok
+      ViewPort.inspect_semantic(viewport)
+      # Prints:
+      # === Semantic Tree for :main ===
+      # Total elements: 5
+      # 
+      # By type:
+      #   button: 2 elements
+      #     - :submit_btn: %{type: :button, label: "Submit"}
+      #     - :cancel_btn: %{type: :button, label: "Cancel"}
+      #   text_buffer: 1 element
+      #     - :buffer_1: %{type: :text_buffer, buffer_id: 1}
+      # => :ok
   """
   @spec inspect_semantic(viewport :: ViewPort.t(), graph_key :: any) :: :ok
   def inspect_semantic(%ViewPort{} = viewport, graph_key \\ :main) do
