@@ -681,6 +681,12 @@ defmodule Scenic.Scene do
     GenServer.cast(pid, msg)
   end
 
+  @doc "Call a message to a scene's parent synchronously"
+  @spec call_parent(scene :: Scene.t(), msg :: any) :: any
+  def call_parent(%Scene{parent: pid}, msg) do
+    GenServer.call(pid, msg)
+  end
+
   @doc "Cast a message to a scene's children"
   @spec send_children(scene :: Scene.t(), msg :: any) :: :ok | {:error, :no_children}
   def send_children(%Scene{children: nil}, _msg), do: {:error, :no_children}
@@ -1017,6 +1023,29 @@ defmodule Scenic.Scene do
 
   This has replaced push_graph() as the preferred way to push a graph.
   """
+  @doc """
+  Invoked to observe input before it's routed to handlers.
+
+  This callback is called BEFORE `handle_input` and allows scenes to observe
+  input without consuming it. Always returns the scene unchanged - any return
+  value other than `{:noreply, scene}` is ignored.
+
+  Use this for debugging, visualization, logging, or telemetry without
+  interfering with normal input routing.
+
+  ## Example
+
+      def observe_input({:cursor_button, {:btn_left, 1, [], coords}}, _id, scene) do
+        # Visualize clicks without consuming them
+        send(self(), {:visualize_click, coords})
+        {:noreply, scene}
+      end
+
+      def observe_input(_input, _id, scene), do: {:noreply, scene}
+  """
+  @callback observe_input(input :: Scenic.ViewPort.Input.t(), id :: any, scene :: Scene.t()) ::
+              {:noreply, scene} when scene: Scene.t()
+
   @callback handle_input(input :: Scenic.ViewPort.Input.t(), id :: any, scene :: Scene.t()) ::
               {:noreply, scene}
               | {:noreply, scene}
@@ -1152,7 +1181,8 @@ defmodule Scenic.Scene do
               | {:noreply, scene, timeout() | :hibernate | {:continue, term()}}
             when scene: Scene.t()
 
-  @optional_callbacks handle_event: 3,
+  @optional_callbacks observe_input: 3,
+                      handle_event: 3,
                       handle_input: 3,
                       handle_get: 2,
                       handle_put: 2,
@@ -1381,6 +1411,22 @@ defmodule Scenic.Scene do
         {:_input, input, raw_input, id},
         %Scene{module: module, viewport: %{pid: vp_pid}} = scene
       ) do
+    IO.puts("🔍 DEBUG: Scene #{inspect(module)} received input: #{inspect(input)}")
+
+    # First, call observe_input if it exists (for non-consuming observation)
+    scene = case Kernel.function_exported?(module, :observe_input, 3) do
+      true ->
+        IO.puts("🔍 DEBUG: #{inspect(module)} HAS observe_input, calling it...")
+        case module.observe_input(input, id, scene) do
+          {:noreply, %Scene{} = scene} -> scene
+          _ -> scene  # Ignore any other return value
+        end
+      false ->
+        IO.puts("🔍 DEBUG: #{inspect(module)} does NOT have observe_input")
+        scene
+    end
+
+    # Then, call handle_input as normal
     case Kernel.function_exported?(module, :handle_input, 3) do
       true ->
         case module.handle_input(input, id, scene) do

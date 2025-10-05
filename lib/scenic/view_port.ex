@@ -2357,7 +2357,7 @@ defmodule Scenic.ViewPort do
     end)
     
     # Find all children of current nodes
-    children = Enum.flat_map(nodes, fn {key, data} ->
+    children = Enum.flat_map(nodes, fn {_key, data} ->
       data.children
       |> Enum.map(fn child_key ->
         child_data = Map.get(data_map, child_key)

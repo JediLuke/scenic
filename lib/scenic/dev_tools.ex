@@ -1225,7 +1225,7 @@ defmodule Scenic.DevTools do
     end
   end
 
-  defp show_scene_detail(analysis, scene_filter, detailed) do
+  defp show_scene_detail(analysis, scene_filter, _detailed) do
     scene = Enum.find(analysis.scenes, fn s ->
       String.contains?(String.downcase(s.scene_name), String.downcase(scene_filter)) or
       String.contains?(s.graph_key, scene_filter)
@@ -1295,7 +1295,7 @@ defmodule Scenic.DevTools do
     IO.puts("#{prefix}📊 #{short_id(key)}#{type_info}")
     
     # Show children
-    children = Enum.filter(all_entries, fn {child_key, child_data} ->
+    children = Enum.filter(all_entries, fn {_child_key, child_data} ->
       child_data.parent == key
     end)
     
@@ -1303,7 +1303,7 @@ defmodule Scenic.DevTools do
     |> Enum.each(fn {{child_key, child_data}, idx} ->
       is_last = idx == length(children) - 1
       child_prefix = prefix <> if is_last, do: "└── ", else: "├── "
-      next_prefix = prefix <> if is_last, do: "    ", else: "│   "
+      _next_prefix = prefix <> if is_last, do: "    ", else: "│   "
       
       render_hierarchy_tree(child_key, child_data, all_entries, child_prefix, verbose)
     end)
@@ -1436,7 +1436,7 @@ defmodule Scenic.DevTools do
     "#{type_info}#{semantic_info}#{content_info}"
   end
 
-  defp suggest_available_options(opts) do
+  defp suggest_available_options(_opts) do
     # This would show what options are actually available
     # For now, just show a helpful message
     IO.puts("\n💡 Try:")
