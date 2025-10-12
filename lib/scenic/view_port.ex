@@ -689,10 +689,50 @@ defmodule Scenic.ViewPort do
       ViewPort.get_semantic(viewport, :specific_graph)
       # => {:ok, %{...}}
   """
-  @spec get_semantic(viewport :: ViewPort.t(), graph_key :: any) :: 
+  @spec get_semantic(viewport :: ViewPort.t(), graph_key :: any) ::
           {:ok, map} | {:error, :no_semantic_info}
   def get_semantic(%ViewPort{pid: pid}, graph_key \\ :main) do
     GenServer.call(pid, {:get_semantic, graph_key})
+  end
+
+  @doc """
+  Register a semantic element in the viewport's semantic table.
+
+  This allows components and scenes to manually register clickable elements
+  with their semantic information and bounds for testing and automation.
+
+  ## Parameters
+    - `viewport` - The ViewPort struct or PID
+    - `graph_key` - The graph key (typically the scene name or :_root_)
+    - `element_id` - The semantic ID for this element (atom)
+    - `semantic_data` - Map containing element metadata including:
+      - `:type` - Element type (e.g., :button, :text_input)
+      - `:label` - Human-readable label
+      - `:clickable` - Boolean indicating if element accepts clicks
+      - `:bounds` - Map with :left, :top, :width, :height
+
+  ## Examples
+      ViewPort.register_semantic(viewport, :_root_, :my_button, %{
+        type: :button,
+        label: "Click Me",
+        clickable: true,
+        bounds: %{left: 100, top: 200, width: 150, height: 40}
+      })
+  """
+  @spec register_semantic(
+          viewport :: ViewPort.t() | pid(),
+          graph_key :: any(),
+          element_id :: atom(),
+          semantic_data :: map()
+        ) :: :ok
+  def register_semantic(viewport, graph_key, element_id, semantic_data)
+
+  def register_semantic(%ViewPort{pid: pid}, graph_key, element_id, semantic_data) do
+    register_semantic(pid, graph_key, element_id, semantic_data)
+  end
+
+  def register_semantic(pid, graph_key, element_id, semantic_data) when is_pid(pid) do
+    GenServer.call(pid, {:register_semantic, graph_key, element_id, semantic_data})
   end
 
   # --------------------------------------------------------
@@ -1328,6 +1368,40 @@ defmodule Scenic.ViewPort do
     {:reply, result, state}
   end
 
+  # Register a semantic element
+  def handle_call({:register_semantic, graph_key, element_id, semantic_data}, _from, %{semantic_table: semantic_table} = state) do
+    # Get current semantic data for this graph, or create new
+    current_data = case :ets.lookup(semantic_table, graph_key) do
+      [{^graph_key, data}] -> data
+      [] -> %{
+        graph_key: graph_key,
+        timestamp: System.system_time(:millisecond),
+        elements: %{},
+        by_type: %{}
+      }
+    end
+
+    # Add the new element
+    element_type = Map.get(semantic_data, :type, :unknown)
+
+    updated_data = current_data
+    |> put_in([:elements, element_id], Map.merge(semantic_data, %{id: element_id}))
+    |> update_in([:by_type, element_type], fn existing ->
+      existing = existing || []
+      if element_id in existing do
+        existing
+      else
+        [element_id | existing]
+      end
+    end)
+    |> Map.put(:timestamp, System.system_time(:millisecond))
+
+    # Store back in ETS
+    :ets.insert(semantic_table, {graph_key, updated_data})
+
+    {:reply, :ok, state}
+  end
+
   def handle_call(invalid, from, %{name: name} = state) do
     Logger.error("""
     ViewPort #{inspect(name || self())} ignored bad call
@@ -1825,7 +1899,12 @@ defmodule Scenic.ViewPort do
          {:cursor_button, {button, action, mods, gxy}} = input,
          %{input_lists: ils}
        ) do
-    with {:ok, pid, xy, _inv_tx, id} <- input_find_hit(ils, :cursor_button, @root_id, gxy) do
+    require Logger
+    result = input_find_hit(ils, :cursor_button, @root_id, gxy)
+    Logger.info("📬 do_listed_input result: #{inspect(result)}")
+
+    with {:ok, pid, xy, _inv_tx, id} <- result do
+      Logger.info("📤 Sending input to PID #{inspect(pid)}, id: #{inspect(id)}, coords: #{inspect(xy)}")
       send(pid, {:_input, {:cursor_button, {button, action, mods, xy}}, input, id})
     end
   end
@@ -2015,11 +2094,16 @@ defmodule Scenic.ViewPort do
   end
 
   defp input_find_hit(lists, input_type, name, global_point, parent_tx) do
+    # require Logger
+    # Logger.info("🎯 input_find_hit: name=#{inspect(name)}, type=#{inspect(input_type)}, point=#{inspect(global_point)}")
+
     case Map.fetch(lists, name) do
       {:ok, {in_list, _, _}} ->
+        # Logger.info("  Found input_list with #{length(in_list)} items")
         do_find_hit(in_list, input_type, global_point, lists, name, parent_tx)
 
       _ ->
+        # Logger.info("  No input_list found for #{inspect(name)}")
         :not_found
     end
   end
@@ -2036,17 +2120,22 @@ defmodule Scenic.ViewPort do
          name,
          parent_tx
        ) do
+    # require Logger
+    # Logger.info("🔍 Component hit test: name=#{inspect(name)}, component_id=#{inspect(data)}, point=#{inspect(global_point)}")
+
     # calculate the local matrix, which becomes the parent of the component
     local_tx = Math.Matrix.mul(parent_tx, local_tx)
 
     # recurse to test the component
     case input_find_hit(lists, input_type, data, global_point, local_tx) do
       {:ok, _, _, _, _} = hit ->
-        # Rhere was a hit inside the component. Return result as we are done.
+        # There was a hit inside the component. Return result as we are done.
+        # Logger.info("✅ Component hit found!")
         hit
 
       :not_found ->
         # if not found, keep going
+        # Logger.info("❌ Component hit not found, continuing...")
         do_find_hit(tail, input_type, global_point, lists, name, parent_tx)
     end
   end
@@ -2091,20 +2180,24 @@ defmodule Scenic.ViewPort do
 
   # Build semantic information from a graph
   defp build_semantic_info(graph, graph_key) do
-    elements = 
+    elements =
       graph.primitives
       |> Enum.reduce(%{}, fn {id, primitive}, acc ->
         # Extract semantic data if present - use direct access for struct fields
         # Check if primitive has opts field and it contains semantic data
-        semantic = case Map.get(primitive, :opts) do
-          nil -> nil
+        opts = Map.get(primitive, :opts, [])
+        semantic = case opts do
           opts when is_list(opts) -> Keyword.get(opts, :semantic)
           _ -> nil
         end
-        
+
         if semantic do
+          # The ID is stored in primitive.id field, not in opts
+          symbolic_id = Map.get(primitive, :id, id)
+
           element_info = %{
-            id: id,
+            id: symbolic_id,
+            primitive_id: id,
             type: primitive.module,
             semantic: semantic,
             # Extract text content for text primitives
@@ -2112,7 +2205,7 @@ defmodule Scenic.ViewPort do
             # Store transform for position info if needed
             transforms: primitive.transforms
           }
-          Map.put(acc, id, element_info)
+          Map.put(acc, symbolic_id, element_info)
         else
           acc
         end
