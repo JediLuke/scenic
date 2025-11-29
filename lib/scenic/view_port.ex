@@ -114,12 +114,18 @@ defmodule Scenic.ViewPort do
           pid: pid,
           # name_table: reference,
           script_table: reference,
+          semantic_table: reference | nil,
+          semantic_index: reference | nil,
+          semantic_enabled: boolean(),
           size: {number, number}
         }
   defstruct name: nil,
             pid: nil,
             # name_table: nil,
             script_table: nil,
+            semantic_table: nil,
+            semantic_index: nil,
+            semantic_enabled: false,
             size: nil
 
   @viewports :scenic_viewports
@@ -370,6 +376,13 @@ defmodule Scenic.ViewPort do
 
     with {:ok, script} <- GraphCompiler.compile(graph),
          {:ok, input_list} <- compile_input(graph) do
+      # Parallel semantic compilation (Phase 1)
+      if viewport.semantic_enabled do
+        Task.start(fn ->
+          compile_and_store_semantics(viewport, name, graph, opts)
+        end)
+      end
+
       # write the script - but only if it has actually changed
       case get_script(viewport, name) do
         {:ok, ^script} ->
@@ -503,6 +516,28 @@ defmodule Scenic.ViewPort do
     # name_table = :ets.new(:_vp_name_table_, [:protected])
     script_table = :ets.new(:_vp_script_table_, [:public, {:read_concurrency, true}])
 
+    # Create semantic tables if enabled (default: true)
+    {semantic_table, semantic_index, semantic_enabled} =
+      if opts[:semantic_registration] != false do
+        st =
+          :ets.new(:_vp_semantic_table_, [
+            :public,
+            :ordered_set,
+            {:read_concurrency, true}
+          ])
+
+        si =
+          :ets.new(:_vp_semantic_index_, [
+            :public,
+            :set,
+            {:read_concurrency, true}
+          ])
+
+        {st, si, true}
+      else
+        {nil, nil, false}
+      end
+
     state = %{
       # simple metadata about the ViewPort
       name: opts[:name],
@@ -534,11 +569,19 @@ defmodule Scenic.ViewPort do
       # ets table for scripts. Public. Readable and Writable by others. The intended
       # use is that Scenes compile graphs in their own process and insert the scripts
       # in parallel to each other. (Trying to avoid serializing the VP on large messages)
-      # containing either script of graph data. The scripts can be read by multiple 
+      # containing either script of graph data. The scripts can be read by multiple
       # drivers at the same time, so is read parallel optimized. If the public write
       # becomes problematic, the next step is to have the scripts compile, then send
       # finished scripts to the VP for writing.
       script_table: script_table,
+
+      # Semantic element tables for testing/automation (Phase 1)
+      # semantic_table: ETS table with {scene_name, element_id} -> Entry
+      # semantic_index: ETS table with element_id -> {scene_name, element_id}
+      # semantic_enabled: boolean flag
+      semantic_table: semantic_table,
+      semantic_index: semantic_index,
+      semantic_enabled: semantic_enabled,
 
       # state related to input from drivers to scenes
       # input lists are generated when a scene pushes a graph. Primitives
@@ -1167,10 +1210,40 @@ defmodule Scenic.ViewPort do
   # ============================================================================
   # internal utilities
 
+  # Compile and store semantic elements (Phase 1)
+  defp compile_and_store_semantics(viewport, scene_name, graph, _opts) do
+    # Compile semantic tree
+    {:ok, entries} = Scenic.Semantic.Compiler.compile(graph)
+
+    # Store in ETS tables
+    Enum.each(entries, fn entry ->
+      # Store in main semantic table (hierarchical key)
+      key = {scene_name, entry.id}
+      :ets.insert(viewport.semantic_table, {key, entry})
+
+      # Store in index table (flat lookup)
+      :ets.insert(viewport.semantic_index, {entry.id, key})
+    end)
+
+    :ok
+  rescue
+    error ->
+      require Logger
+
+      Logger.warning(
+        "Semantic compilation failed for #{inspect(scene_name)}: #{Exception.message(error)}"
+      )
+
+      :ok
+  end
+
   defp gen_info(%{
          name: name,
          # name_table: name_table,
          script_table: script_table,
+         semantic_table: semantic_table,
+         semantic_index: semantic_index,
+         semantic_enabled: semantic_enabled,
          size: size
        }) do
     %ViewPort{
@@ -1178,6 +1251,9 @@ defmodule Scenic.ViewPort do
       name: name,
       # name_table: name_table,
       script_table: script_table,
+      semantic_table: semantic_table,
+      semantic_index: semantic_index,
+      semantic_enabled: semantic_enabled,
       size: size
     }
   end
