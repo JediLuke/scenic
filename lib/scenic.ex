@@ -84,4 +84,5 @@ defmodule Scenic do
     ]
     |> Supervisor.init(strategy: :one_for_one)
   end
+
 end
