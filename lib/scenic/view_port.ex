@@ -236,7 +236,7 @@ defmodule Scenic.ViewPort do
 
   - `:name` - Optional atom name to register the ViewPort process
   - `:size` - Required `{width, height}` tuple defining the viewport dimensions
-  - `:default_scene` - Required scene module or `{module, args}` tuple for the root scene  
+  - `:default_scene` - Required scene module or `{module, args}` tuple for the root scene
   - `:theme` - Theme configuration (defaults to `:dark`)
   - `:drivers` - List of driver configurations to start automatically
   - `:input_filter` - Filter for input types (defaults to `:all`)
@@ -252,7 +252,7 @@ defmodule Scenic.ViewPort do
       # Basic viewport
       {:ok, vp} = ViewPort.start([
         name: :main_viewport,
-        size: {800, 600}, 
+        size: {800, 600},
         default_scene: MyApp.MainScene
       ])
 
@@ -307,8 +307,8 @@ defmodule Scenic.ViewPort do
   @doc """
   Retrieve a compiled script by name from the ViewPort's ETS table.
 
-  Scripts are the compiled, optimized rendering instructions that drivers use to 
-  draw graphics. This function allows drivers and debugging tools to access 
+  Scripts are the compiled, optimized rendering instructions that drivers use to
+  draw graphics. This function allows drivers and debugging tools to access
   stored scripts directly.
 
   ## Parameters
@@ -325,7 +325,7 @@ defmodule Scenic.ViewPort do
 
       # Retrieve a script by name
       case ViewPort.get_script(viewport, "my_button") do
-        {:ok, script} -> 
+        {:ok, script} ->
           # Process or inspect the script
           IO.inspect(script, label: "Button script")
         {:error, :not_found} ->
@@ -355,7 +355,7 @@ defmodule Scenic.ViewPort do
   Store a compiled script in the ViewPort's ETS table and notify drivers.
 
   This is the primary mechanism for publishing rendering instructions to drivers.
-  Scripts are stored with change detection - if the same script content is 
+  Scripts are stored with change detection - if the same script content is
   submitted again, drivers won't be notified unnecessarily.
 
   ## Parameters
@@ -379,7 +379,7 @@ defmodule Scenic.ViewPort do
 
       # Store a manually created script
       script = Script.start()
-      |> Script.fill_color({255, 0, 0, 255})  
+      |> Script.fill_color({255, 0, 0, 255})
       |> Script.draw_rect({100, 50})
       |> Script.finish()
 
@@ -468,13 +468,13 @@ defmodule Scenic.ViewPort do
 
   This is the primary mechanism scenes use to publish their UI for rendering.
   The graph is compiled into an optimized script using `Scenic.Graph.Compiler`,
-  stored in the ViewPort's ETS table, and drivers are notified to update their 
+  stored in the ViewPort's ETS table, and drivers are notified to update their
   rendering. Input handling data is also extracted and registered.
 
   ## Parameters
 
   - `viewport` - The ViewPort struct containing the script table reference
-  - `name` - Unique identifier for the graph/script (can be any term)  
+  - `name` - Unique identifier for the graph/script (can be any term)
   - `graph` - The Graph struct containing primitives, styles, and transforms
   - `opts` - Optional configuration (see options below)
 
@@ -527,7 +527,7 @@ defmodule Scenic.ViewPort do
 
   Compilation can fail if the graph contains:
   - Invalid primitive data
-  - Malformed transforms or styles  
+  - Malformed transforms or styles
   - Circular script references
   - Resource references that can't be resolved
   """
@@ -549,6 +549,13 @@ defmodule Scenic.ViewPort do
 
     with {:ok, script} <- GraphCompiler.compile(graph),
          {:ok, input_list} <- compile_input(graph) do
+      # Parallel semantic compilation (Phase 1)
+      if viewport.semantic_enabled do
+        Task.start(fn ->
+          compile_and_store_semantics(viewport, name, graph, opts)
+        end)
+      end
+
       # write the script - but only if it has actually changed
       case get_script(viewport, name) do
         {:ok, ^script} ->
@@ -561,15 +568,15 @@ defmodule Scenic.ViewPort do
           # write the script to the table
           # this notifies the drivers...
           put_script(viewport, name, script, owner: owner)
-          
+
           # Build and store semantic information
           semantic_info = build_semantic_info(graph, name)
           true = :ets.insert(semantic_table, {name, semantic_info})
-          
+
           # Build and store enhanced scene script information
           scene_script_info = build_scene_script_info(graph, name, script, %{})
           true = :ets.insert(scene_script_table, {name, scene_script_info})
-          
+
           # Recompute hierarchy for all graphs after each update
           recompute_scene_script_hierarchy(scene_script_table)
 
@@ -677,15 +684,15 @@ defmodule Scenic.ViewPort do
   # --------------------------------------------------------
   @doc """
   Get the semantic information for a graph in the viewport.
-  
+
   This is useful during development to inspect what semantic annotations
   are available for testing.
-  
+
   ## Examples
-  
+
       ViewPort.get_semantic(viewport)
       # => {:ok, %{elements: %{...}, by_type: %{...}}}
-      
+
       ViewPort.get_semantic(viewport, :specific_graph)
       # => {:ok, %{...}}
   """
@@ -738,17 +745,17 @@ defmodule Scenic.ViewPort do
   # --------------------------------------------------------
   @doc """
   Inspect all semantic information in the viewport.
-  
+
   This prints a formatted view of all semantic elements, making it easy
   to see what's available during development.
-  
+
   ## Examples
-  
+
       ViewPort.inspect_semantic(viewport)
       # Prints:
       # === Semantic Tree for :main ===
       # Total elements: 5
-      # 
+      #
       # By type:
       #   button: 2 elements
       #     - :submit_btn: %{type: :button, label: "Submit"}
@@ -783,6 +790,28 @@ defmodule Scenic.ViewPort do
     semantic_table = :ets.new(:_vp_semantic_table_, [:public, {:read_concurrency, true}])
     scene_script_table = :ets.new(:_vp_scene_script_table_, [:public, {:read_concurrency, true}])
 
+    # Create semantic tables if enabled (default: true)
+    {semantic_table, semantic_index, semantic_enabled} =
+      if opts[:semantic_registration] != false do
+        st =
+          :ets.new(:_vp_semantic_table_, [
+            :public,
+            :ordered_set,
+            {:read_concurrency, true}
+          ])
+
+        si =
+          :ets.new(:_vp_semantic_index_, [
+            :public,
+            :set,
+            {:read_concurrency, true}
+          ])
+
+        {st, si, true}
+      else
+        {nil, nil, false}
+      end
+
     state = %{
       # simple metadata about the ViewPort
       name: opts[:name],
@@ -814,13 +843,21 @@ defmodule Scenic.ViewPort do
       # ets table for scripts. Public. Readable and Writable by others. The intended
       # use is that Scenes compile graphs in their own process and insert the scripts
       # in parallel to each other. (Trying to avoid serializing the VP on large messages)
-      # containing either script of graph data. The scripts can be read by multiple 
+      # containing either script of graph data. The scripts can be read by multiple
       # drivers at the same time, so is read parallel optimized. If the public write
       # becomes problematic, the next step is to have the scripts compile, then send
       # finished scripts to the VP for writing.
       script_table: script_table,
       semantic_table: semantic_table,
       scene_script_table: scene_script_table,
+
+      # Semantic element tables for testing/automation (Phase 1)
+      # semantic_table: ETS table with {scene_name, element_id} -> Entry
+      # semantic_index: ETS table with element_id -> {scene_name, element_id}
+      # semantic_enabled: boolean flag
+      semantic_table: semantic_table,
+      semantic_index: semantic_index,
+      semantic_enabled: semantic_enabled,
 
       # state related to input from drivers to scenes
       # input lists are generated when a scene pushes a graph. Primitives
@@ -1493,6 +1530,33 @@ defmodule Scenic.ViewPort do
   # ============================================================================
   # internal utilities
 
+  # Compile and store semantic elements (Phase 1)
+  defp compile_and_store_semantics(viewport, scene_name, graph, _opts) do
+    # Compile semantic tree
+    {:ok, entries} = Scenic.Semantic.Compiler.compile(graph)
+
+    # Store in ETS tables
+    Enum.each(entries, fn entry ->
+      # Store in main semantic table (hierarchical key)
+      key = {scene_name, entry.id}
+      :ets.insert(viewport.semantic_table, {key, entry})
+
+      # Store in index table (flat lookup)
+      :ets.insert(viewport.semantic_index, {entry.id, key})
+    end)
+
+    :ok
+  rescue
+    error ->
+      require Logger
+
+      Logger.warning(
+        "Semantic compilation failed for #{inspect(scene_name)}: #{Exception.message(error)}"
+      )
+
+      :ok
+  end
+
   defp gen_info(%{
          name: name,
          # name_table: name_table,
@@ -1568,18 +1632,18 @@ defmodule Scenic.ViewPort do
           # it isn't there or has changed
           _ ->
             true = :ets.insert(script_table, {name, script, :viewport})
-            
+
             # Build and store semantic information
             semantic_info = build_semantic_info(graph, name)
             true = :ets.insert(semantic_table, {name, semantic_info})
-            
+
             # Build and store enhanced scene script information
             scene_script_info = build_scene_script_info(graph, name, script, state)
             true = :ets.insert(scene_script_table, {name, scene_script_info})
-            
+
             # Recompute hierarchy for all graphs after each update
             recompute_scene_script_hierarchy(scene_script_table)
-            
+
             :ok
         end
 
@@ -2006,7 +2070,7 @@ defmodule Scenic.ViewPort do
   # skip script primitives - no input handlers there
   defp comp_input_prim(input, _uid, %Primitive{module: Primitive.Script}, _, _tx), do: input
 
-  # it is a group. Calc the local transform if there one, but doesn't go into the 
+  # it is a group. Calc the local transform if there one, but doesn't go into the
   # list as a component itself...
   defp comp_input_prim(
          input,
@@ -2210,7 +2274,7 @@ defmodule Scenic.ViewPort do
           acc
         end
       end)
-    
+
     %{
       graph_key: graph_key,
       timestamp: System.system_time(:millisecond),
@@ -2224,15 +2288,15 @@ defmodule Scenic.ViewPort do
   defp build_scene_script_info(graph, graph_key, script, state) do
     # Extract all elements (not just semantic ones)
     elements = extract_all_elements(graph)
-    
+
     # Extract script references for hierarchy
     children = extract_script_references(script)
-    
+
     # Debug output (removed for production)
-    
+
     # Build enhanced element data
     enhanced_elements = enhance_elements(elements, graph)
-    
+
     %{
       # === HIERARCHY INFORMATION ===
       graph_key: graph_key,
@@ -2240,18 +2304,18 @@ defmodule Scenic.ViewPort do
       parent: nil,                    # Will be computed during hierarchy pass
       depth: 0,                      # Will be computed during hierarchy pass
       render_order: 0,               # Will be computed during hierarchy pass
-      
+
       # === METADATA ===
       timestamp: System.system_time(:millisecond),
       owner_pid: determine_owner_pid(state),
-      
+
       # === VISUAL INFORMATION ===
       transforms: extract_graph_transforms(script),
       bounds: %{x: 0, y: 0, w: 0, h: 0},  # Will be computed from primitives
-      
+
       # === ELEMENTS (Enhanced from current semantic system) ===
       elements: enhanced_elements,
-      
+
       # === FAST LOOKUPS ===
       by_type: group_elements_by_semantic_type(enhanced_elements),
       by_role: group_elements_by_role(enhanced_elements),
@@ -2268,13 +2332,13 @@ defmodule Scenic.ViewPort do
         type: primitive.module,
         primitive_data: primitive.data,
         transforms: primitive.transforms,
-        
+
         # Semantic data (if present)
         semantic: extract_semantic_data(primitive),
-        
+
         # Content (for text primitives)
         content: extract_content(primitive),
-        
+
         # Computed properties for automation
         clickable: is_clickable_primitive(primitive),
         visible: true,  # Will be computed based on transforms/clips
@@ -2302,9 +2366,9 @@ defmodule Scenic.ViewPort do
     end)
     |> Enum.map(fn {:script, key} -> key end)
     |> Enum.uniq()
-    
+
     # Debug output (removed for production)
-    
+
     references
   end
   defp extract_script_references(_), do: []
@@ -2383,10 +2447,10 @@ defmodule Scenic.ViewPort do
   defp recompute_scene_script_hierarchy(scene_script_table) do
     # Get all current scene script entries
     entries = :ets.tab2list(scene_script_table)
-    
+
     # Build parent/child relationships and compute depths
     updated_entries = compute_hierarchy_relationships(entries)
-    
+
     # Update all entries with new hierarchy information
     Enum.each(updated_entries, fn {key, updated_data} ->
       :ets.insert(scene_script_table, {key, updated_data})
@@ -2397,17 +2461,17 @@ defmodule Scenic.ViewPort do
   defp compute_hierarchy_relationships(entries) do
     # Create a map for easier lookups
     data_map = Map.new(entries)
-    
+
     # Build parent relationships by finding who references each graph
     entries_with_parents = Enum.map(entries, fn {key, data} ->
       parent = find_parent_graph(key, data_map)
       updated_data = Map.put(data, :parent, parent)
       {key, updated_data}
     end)
-    
+
     # Compute depths starting from root nodes
     entries_with_depths = compute_depths(entries_with_parents)
-    
+
     entries_with_depths
   end
 
@@ -2425,15 +2489,15 @@ defmodule Scenic.ViewPort do
   # Compute depth for each graph based on its position in the hierarchy
   defp compute_depths(entries_with_parents) do
     data_map = Map.new(entries_with_parents)
-    
+
     # Find root graphs (no parent)
     roots = Enum.filter(entries_with_parents, fn {_key, data} ->
       data.parent == nil
     end)
-    
+
     # Assign depths starting from roots
     depth_assignments = compute_depths_recursive(roots, data_map, %{}, 0)
-    
+
     # Apply depth assignments to all entries
     Enum.map(entries_with_parents, fn {key, data} ->
       depth = Map.get(depth_assignments, key, 0)
@@ -2448,7 +2512,7 @@ defmodule Scenic.ViewPort do
     updated_depth_map = Enum.reduce(nodes, depth_map, fn {key, _data}, acc ->
       Map.put(acc, key, current_depth)
     end)
-    
+
     # Find all children of current nodes
     children = Enum.flat_map(nodes, fn {_key, data} ->
       data.children
@@ -2462,7 +2526,7 @@ defmodule Scenic.ViewPort do
       end)
       |> Enum.filter(& &1)
     end)
-    
+
     # Recurse for children if any exist
     if children != [] do
       compute_depths_recursive(children, data_map, updated_depth_map, current_depth + 1)
