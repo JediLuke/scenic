@@ -115,6 +115,8 @@ defmodule Scenic.ViewPort do
           # name_table: reference,
           script_table: reference,
           semantic_table: reference,
+          semantic_index: reference | nil,
+          semantic_enabled: boolean(),
           scene_script_table: reference,
           size: {number, number}
         }
@@ -123,6 +125,8 @@ defmodule Scenic.ViewPort do
             # name_table: nil,
             script_table: nil,
             semantic_table: nil,
+            semantic_index: nil,
+            semantic_enabled: false,
             scene_script_table: nil,
             size: nil
 
@@ -787,7 +791,6 @@ defmodule Scenic.ViewPort do
     # script_table = :ets.new( make_ref(), [:public, {:read_concurrency, true}] )
     # name_table = :ets.new(:_vp_name_table_, [:protected])
     script_table = :ets.new(:_vp_script_table_, [:public, {:read_concurrency, true}])
-    semantic_table = :ets.new(:_vp_semantic_table_, [:public, {:read_concurrency, true}])
     scene_script_table = :ets.new(:_vp_scene_script_table_, [:public, {:read_concurrency, true}])
 
     # Create semantic tables if enabled (default: true)
@@ -848,7 +851,6 @@ defmodule Scenic.ViewPort do
       # becomes problematic, the next step is to have the scripts compile, then send
       # finished scripts to the VP for writing.
       script_table: script_table,
-      semantic_table: semantic_table,
       scene_script_table: scene_script_table,
 
       # Semantic element tables for testing/automation (Phase 1)
@@ -1562,6 +1564,8 @@ defmodule Scenic.ViewPort do
          # name_table: name_table,
          script_table: script_table,
          semantic_table: semantic_table,
+         semantic_index: semantic_index,
+         semantic_enabled: semantic_enabled,
          scene_script_table: scene_script_table,
          size: size
        }) do
@@ -1571,6 +1575,8 @@ defmodule Scenic.ViewPort do
       # name_table: name_table,
       script_table: script_table,
       semantic_table: semantic_table,
+      semantic_index: semantic_index,
+      semantic_enabled: semantic_enabled,
       scene_script_table: scene_script_table,
       size: size
     }
@@ -1963,12 +1969,7 @@ defmodule Scenic.ViewPort do
          {:cursor_button, {button, action, mods, gxy}} = input,
          %{input_lists: ils}
        ) do
-    require Logger
-    result = input_find_hit(ils, :cursor_button, @root_id, gxy)
-    Logger.info("📬 do_listed_input result: #{inspect(result)}")
-
-    with {:ok, pid, xy, _inv_tx, id} <- result do
-      Logger.info("📤 Sending input to PID #{inspect(pid)}, id: #{inspect(id)}, coords: #{inspect(xy)}")
+    with {:ok, pid, xy, _inv_tx, id} <- input_find_hit(ils, :cursor_button, @root_id, gxy) do
       send(pid, {:_input, {:cursor_button, {button, action, mods, xy}}, input, id})
     end
   end

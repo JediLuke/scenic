@@ -1411,18 +1411,14 @@ defmodule Scenic.Scene do
         {:_input, input, raw_input, id},
         %Scene{module: module, viewport: %{pid: vp_pid}} = scene
       ) do
-    IO.puts("🔍 DEBUG: Scene #{inspect(module)} received input: #{inspect(input)}")
-
     # First, call observe_input if it exists (for non-consuming observation)
     scene = case Kernel.function_exported?(module, :observe_input, 3) do
       true ->
-        IO.puts("🔍 DEBUG: #{inspect(module)} HAS observe_input, calling it...")
         case module.observe_input(input, id, scene) do
           {:noreply, %Scene{} = scene} -> scene
           _ -> scene  # Ignore any other return value
         end
       false ->
-        IO.puts("🔍 DEBUG: #{inspect(module)} does NOT have observe_input")
         scene
     end
 
